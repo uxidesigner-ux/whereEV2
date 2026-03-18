@@ -72,8 +72,8 @@ body {
   gap: 8px !important;
 }
 
-/* 자식·손자: liquid glass 미적용, border-radius 16px, padding 8px. 드롭다운은 제외 */
-.ev-glass-overlay > *:not([class*="MuiPopover"]):not([class*="MuiMenu"]):not([class*="MuiModal"]):not([role="listbox"]) {
+/* 자식·손자: liquid glass 미적용, border-radius 16px, padding 8px. 드롭다운·패널토글 버튼 제외 */
+.ev-glass-overlay > *:not([class*="MuiPopover"]):not([class*="MuiMenu"]):not([class*="MuiModal"]):not([role="listbox"]):not(.ev-panel-toggle) {
   border-radius: 16px !important;
   padding: 8px !important;
   box-sizing: border-box !important;
@@ -84,7 +84,8 @@ body {
   border: none !important;
 }
 
-.ev-glass-overlay > * > *:not([class*="MuiPopover"]):not([class*="MuiMenu"]):not([class*="MuiModal"]):not([role="listbox"]) {
+/* 손자 reset: 직계 부모가 .ev-panel-toggle인 경우 제외(버튼 내부 아이콘 보호) */
+.ev-glass-overlay > *:not(.ev-panel-toggle) > *:not([class*="MuiPopover"]):not([class*="MuiMenu"]):not([class*="MuiModal"]):not([role="listbox"]) {
   border-radius: 16px !important;
   padding: 8px !important;
   box-sizing: border-box !important;
@@ -93,6 +94,42 @@ body {
   -webkit-backdrop-filter: none !important;
   box-shadow: none !important;
   border: none !important;
+}
+
+/* 패널 토글 버튼: glass reset 제외, 항상 가시성 유지 (desktop 좌측 패널 open 시) */
+.ev-panel-toggle {
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 0 !important;
+  border-radius: 999px !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12) !important;
+  color: #111827 !important;
+  opacity: 1 !important;
+}
+
+/* 패널 토글 버튼 내부 아이콘: reset 영향 제거, 명시적 가시성 */
+.ev-panel-toggle .MuiSvgIcon-root,
+.ev-panel-toggle svg {
+  display: block !important;
+  width: 20px !important;
+  height: 20px !important;
+  font-size: 20px !important;
+  color: #111827 !important;
+  fill: #111827 !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  transform: none !important;
+  flex-shrink: 0 !important;
+}
+.ev-panel-toggle svg path {
+  fill: #111827 !important;
+  opacity: 1 !important;
 }
 
 /* EV 대시보드: 지도 팝업 glass 스타일 (정제된 radius) */
@@ -109,6 +146,40 @@ body {
   min-width: 180px;
   font-size: 12px;
   line-height: 1.45;
+}
+
+/* EV 대시보드: 줌/위치 컨트롤 우측 상단, 패널과 간격 */
+.leaflet-top.leaflet-right {
+  margin-top: 10px;
+  margin-right: 10px;
+}
+.leaflet-control-location {
+  margin-top: 6px !important;
+}
+.leaflet-control-location button {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* EV 대시보드: 플랫 블루 원형 마커 */
+.leaflet-div-icon.ev-marker-simple {
+  background: transparent !important;
+  border: none !important;
+}
+.ev-marker-simple-dot {
+  width: 12px;
+  height: 12px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #2563eb;
+  border: 2px solid #fff;
+  box-sizing: border-box;
+  box-shadow: none;
 }
 
 h1,
