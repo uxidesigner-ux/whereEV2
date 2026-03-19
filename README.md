@@ -14,3 +14,9 @@ The React Compiler is not enabled on this template because of its impact on dev 
 ## Expanding the ESLint configuration
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+
+## Project Goal
+
+AI 바이브 코딩만으로 전국 지자체 별 전기차 충전소 현황을 리포트형 대시보드로 구현하는 테스트.
+반응형 구성.
+스타일 무시 / 컬러톤 제어 / liquid glass 스타일 적용
