@@ -1,5 +1,5 @@
 import 'leaflet/dist/leaflet.css'
-import { useMemo, useState, useEffect, useRef } from 'react'
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import {
   Box,
   Typography,
@@ -12,12 +12,7 @@ import {
   IconButton,
   Chip,
   Button,
-  Modal,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
 } from '@mui/material'
-import ExpandMore from '@mui/icons-material/ExpandMore'
 import EvStationIcon from '@mui/icons-material/EvStation'
 import ChevronLeft from '@mui/icons-material/ChevronLeft'
 import ChevronRight from '@mui/icons-material/ChevronRight'
@@ -38,8 +33,8 @@ import {
   Pie,
   Legend,
 } from 'recharts'
-import { fetchEvChargers } from './api/safemapEv.js'
-import { haversineDistanceKm } from './utils/geo.js'
+import { fetchEvChargers, aggregateStatCounts, getLatestStatUpdDt, formatStatSummary } from './api/safemapEv.js'
+import { haversineDistanceKm, placeKey, formatListSummary } from './utils/geo.js'
 import { colors, spacing, radius, chartBlueScale, glass } from './theme/dashboardTheme.js'
 import { GlassPanel } from './components/GlassPanel.jsx'
 import { StatCard } from './components/StatCard.jsx'
@@ -67,12 +62,25 @@ const muiTheme = createTheme({
   shape: { borderRadius: radius.control },
 })
 
-L.Marker.prototype.options.icon = L.divIcon({
-  className: 'ev-marker-simple',
-  html: '<div class="ev-marker-simple-dot"></div>',
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
+const DEFAULT_MARKER_ICON = L.divIcon({
+  className: 'ev-marker ev-marker-default',
+  html: '<span class="ev-marker-dot"></span>',
+  iconSize: [26, 26],
+  iconAnchor: [13, 13],
 })
+const SELECTED_MARKER_ICON = L.divIcon({
+  className: 'ev-marker ev-marker-selected',
+  html: '<span class="ev-marker-dot"></span>',
+  iconSize: [38, 38],
+  iconAnchor: [19, 19],
+})
+
+/** 상단/패널 충전 타입 필터: 사용자 용어(급속·완속) 단순화 */
+const SPEED_FILTER_OPTIONS = [
+  { value: '', label: '전체' },
+  { value: '급속', label: '급속' },
+  { value: '완속', label: '완속' },
+]
 
 function LocationControl({ setUserLocation, setLocationError, setLocationLoading }) {
   const map = useMap()
@@ -148,6 +156,35 @@ function MapCenterTracker({ setMapCenter }) {
   return null
 }
 
+const BOUNDS_DEBOUNCE_MS = 200
+
+function MapBoundsTracker({ setMapBounds }) {
+  const map = useMap()
+  useEffect(() => {
+    const update = () => {
+      const b = map.getBounds()
+      setMapBounds({
+        southWest: { lat: b.getSouthWest().lat, lng: b.getSouthWest().lng },
+        northEast: { lat: b.getNorthEast().lat, lng: b.getNorthEast().lng },
+      })
+    }
+    let timeoutId
+    const debounced = () => {
+      clearTimeout(timeoutId)
+      timeoutId = setTimeout(update, BOUNDS_DEBOUNCE_MS)
+    }
+    update()
+    map.on('moveend', debounced)
+    map.on('zoomend', debounced)
+    return () => {
+      map.off('moveend', debounced)
+      map.off('zoomend', debounced)
+      clearTimeout(timeoutId)
+    }
+  }, [map, setMapBounds])
+  return null
+}
+
 function MapFocusOnStation({ selectedStation }) {
   const map = useMap()
   useEffect(() => {
@@ -156,38 +193,110 @@ function MapFocusOnStation({ selectedStation }) {
   return null
 }
 
-function MapView({ stations, onDetailClick }) {
+function LocationRipple({ userLocation }) {
+  const map = useMap()
+  const [point, setPoint] = useState(null)
+  const update = useCallback(() => {
+    if (!userLocation) {
+      setPoint(null)
+      return
+    }
+    const p = map.latLngToContainerPoint([userLocation.lat, userLocation.lng])
+    setPoint({ x: p.x, y: p.y })
+  }, [map, userLocation])
+  useEffect(() => {
+    if (!userLocation) {
+      setPoint(null)
+      return
+    }
+    update()
+    map.on('moveend', update)
+    map.on('zoomend', update)
+    map.on('resize', update)
+    return () => {
+      map.off('moveend', update)
+      map.off('zoomend', update)
+      map.off('resize', update)
+    }
+  }, [map, userLocation, update])
+  if (!userLocation || !point) return null
+  return (
+    <div
+      className="ev-location-ripple-wrapper"
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        width: '100%',
+        height: '100%',
+        pointerEvents: 'none',
+        zIndex: 450,
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          left: point.x,
+          top: point.y,
+          transform: 'translate(-50%, -50%)',
+          width: 1,
+          height: 1,
+        }}
+      >
+        <span className="ev-location-ripple" />
+      </div>
+    </div>
+  )
+}
+
+function MapView({ stations, onDetailClick, selectedId, isMobile, defaultMarkerIcon, selectedMarkerIcon }) {
+  const icon = (id) => (selectedId === id ? selectedMarkerIcon : defaultMarkerIcon)
   return (
     <>
       <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+        subdomains="abcd"
+        maxZoom={20}
       />
       {stations.map((s) => (
-        <Marker key={s.id} position={[s.lat, s.lng]}>
-          <Popup maxWidth={320}>
+        <Marker key={s.id} position={[s.lat, s.lng]} icon={icon(s.id)}>
+          <Popup maxWidth={isMobile ? 220 : 320}>
             <Box component="div" sx={{ fontFamily: muiTheme.typography.fontFamily }}>
-              <Typography variant="subtitle2" sx={{ color: colors.blue.primary, fontWeight: 600, mb: 0.5 }}>
-                {s.statNm}
-              </Typography>
-              <Typography variant="caption" display="block" sx={{ color: colors.gray[600] }}>
-                운영기관 {s.busiNm} · {s.chgerTyLabel}
-              </Typography>
-              <Typography variant="caption" display="block" sx={{ color: colors.gray[500], mt: 0.5 }}>
-                이용시간 {s.useTm || '-'} · 전화 {s.telno || '-'}
-              </Typography>
-              <Typography variant="caption" display="block" sx={{ color: colors.gray[500] }}>
-                {s.adres || s.rnAdres || '-'}
-              </Typography>
-              {onDetailClick && (
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={() => onDetailClick(s)}
-                  sx={{ mt: 1, fontSize: '0.75rem' }}
-                >
-                  상세 보기
-                </Button>
+              {isMobile ? (
+                <>
+                  <Typography variant="subtitle2" sx={{ color: colors.blue.primary, fontWeight: 600, fontSize: '0.8125rem', lineHeight: 1.3 }}>
+                    {s.statNm}
+                  </Typography>
+                  <Typography variant="caption" display="block" sx={{ color: colors.gray[600], fontSize: '0.7rem', mt: 0.25 }}>
+                    {s.displayChgerLabel ?? s.chgerTyLabel}
+                  </Typography>
+                  {onDetailClick && (
+                    <Button size="small" variant="contained" onClick={() => onDetailClick(s)} sx={{ mt: 0.75, fontSize: '0.7rem', py: 0.5, bgcolor: colors.blue.primary }}>
+                      상세 보기
+                    </Button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Typography variant="subtitle2" sx={{ color: colors.blue.primary, fontWeight: 600, mb: 0.5 }}>
+                    {s.statNm}
+                  </Typography>
+                  <Typography variant="caption" display="block" sx={{ color: colors.gray[600] }}>
+                    운영기관 {s.busiNm} · {s.displayChgerLabel ?? s.chgerTyLabel}
+                  </Typography>
+                  <Typography variant="caption" display="block" sx={{ color: colors.gray[500], mt: 0.5 }}>
+                    이용시간 {s.useTm || '-'} · 전화 {s.telno || '-'}
+                  </Typography>
+                  <Typography variant="caption" display="block" sx={{ color: colors.gray[500] }}>
+                    {s.adres || s.rnAdres || '-'}
+                  </Typography>
+                  {onDetailClick && (
+                    <Button size="small" variant="outlined" onClick={() => onDetailClick(s)} sx={{ mt: 1, fontSize: '0.75rem' }}>
+                      상세 보기
+                    </Button>
+                  )}
+                </>
               )}
             </Box>
           </Popup>
@@ -203,7 +312,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState(null)
   const [filterBusiNm, setFilterBusiNm] = useState('')
-  const [filterChgerTy, setFilterChgerTy] = useState([]) // 다중 선택: string[]
+  const [filterSpeed, setFilterSpeed] = useState('') // '' | '급속' | '완속'
   const [filterCtprvnCd, setFilterCtprvnCd] = useState('')
   const [filterSggCd, setFilterSggCd] = useState('')
   const isMobile = useMediaQuery('(max-width: 900px)')
@@ -218,9 +327,11 @@ function App() {
   const [locationError, setLocationError] = useState(null)
   const [locationLoading, setLocationLoading] = useState(false)
   const [mapCenter, setMapCenter] = useState({ lat: SEOUL_CENTER[0], lng: SEOUL_CENTER[1] })
+  const [liveMapBounds, setLiveMapBounds] = useState(null)
+  const [appliedMapBounds, setAppliedMapBounds] = useState(null)
+  const liveMapBoundsRef = useRef(null)
+  liveMapBoundsRef.current = liveMapBounds
   const [selectedStation, setSelectedStation] = useState(null)
-  const [filterMoreOpen, setFilterMoreOpen] = useState(false)
-  const [statsExpanded, setStatsExpanded] = useState(false)
 
   useEffect(() => {
     const key = import.meta.env.VITE_SAFEMAP_SERVICE_KEY
@@ -250,22 +361,108 @@ function App() {
   const filteredItems = useMemo(() => {
     return items.filter((s) => {
       if (filterBusiNm && s.busiNm !== filterBusiNm) return false
-      if (filterChgerTy.length > 0 && !filterChgerTy.includes(String(s.chgerTy))) return false
+      if (filterSpeed && s.speedCategory !== filterSpeed) return false
       if (filterCtprvnCd && s.ctprvnCd !== filterCtprvnCd) return false
       if (filterSggCd && s.sggCd !== filterSggCd) return false
       return true
     })
-  }, [items, filterBusiNm, filterChgerTy, filterCtprvnCd, filterSggCd])
+  }, [items, filterBusiNm, filterSpeed, filterCtprvnCd, filterSggCd])
 
-  /** 모바일 목록용: 거리 기준 정렬. userLocation 있으면 내 위치, 없으면 지도 중심 기준. */
-  const sortedItemsForMobile = useMemo(() => {
+  /** 초기: live 수신 시 applied가 없으면 적용. 이후는 버튼 탭 시에만 applied 갱신. */
+  useEffect(() => {
+    if (liveMapBounds && appliedMapBounds == null) setAppliedMapBounds(liveMapBounds)
+  }, [liveMapBounds, appliedMapBounds])
+
+  /** 현재 적용된 검색 영역(applied bounds) 내 충전소만. 헤더 N·지도·목록 공통 기준. */
+  const itemsInScope = useMemo(() => {
+    if (!appliedMapBounds) return []
+    const b = L.latLngBounds(
+      [appliedMapBounds.southWest.lat, appliedMapBounds.southWest.lng],
+      [appliedMapBounds.northEast.lat, appliedMapBounds.northEast.lng]
+    )
+    return filteredItems.filter((s) => b.contains([s.lat, s.lng]))
+  }, [filteredItems, appliedMapBounds])
+
+  /** 모바일 목록용: itemsInScope를 거리순 정렬. userLocation 있으면 내 위치, 없으면 지도 중심 기준. */
+  const sortedItemsInScope = useMemo(() => {
     const ref = userLocation || mapCenter
-    const withDist = filteredItems.map((s) => ({
-      ...s,
-      distanceKm: haversineDistanceKm(ref.lat, ref.lng, s.lat, s.lng),
-    }))
-    return withDist.sort((a, b) => a.distanceKm - b.distanceKm)
+    return itemsInScope
+      .map((s) => ({
+        ...s,
+        distanceKm: haversineDistanceKm(ref.lat, ref.lng, s.lat, s.lng),
+      }))
+      .sort((a, b) => a.distanceKm - b.distanceKm)
+  }, [itemsInScope, userLocation, mapCenter])
+
+  /** 모바일 전용: 같은 장소(statNm+좌표)별로 그룹. 헤더 N·목록·마커를 장소 수 기준으로 통일. */
+  const groupedItemsInScope = useMemo(() => {
+    const byKey = new Map()
+    for (const row of sortedItemsInScope) {
+      const key = placeKey(row)
+      if (!byKey.has(key)) byKey.set(key, { rows: [], distanceKm: row.distanceKm })
+      byKey.get(key).rows.push(row)
+    }
+    return Array.from(byKey.entries())
+      .map(([id, { rows, distanceKm }]) => {
+        const first = rows[0]
+        const statCounts = aggregateStatCounts(rows)
+        return {
+          id,
+          statNm: first.statNm,
+          lat: first.lat,
+          lng: first.lng,
+          distanceKm,
+          totalChargers: rows.length,
+          statCounts,
+          statSummary: formatStatSummary(statCounts),
+          latestStatUpdDt: getLatestStatUpdDt(rows),
+          busiNm: formatListSummary(rows.map((r) => r.busiNm), 2),
+          chgerTyLabel: formatListSummary(rows.map((r) => r.displayChgerLabel ?? r.chgerTyLabel), 2),
+          rows,
+          adres: first.adres,
+          rnAdres: first.rnAdres,
+          useTm: first.useTm,
+          telno: first.telno,
+        }
+      })
+      .sort((a, b) => a.distanceKm - b.distanceKm)
+  }, [sortedItemsInScope])
+
+  /** bounds 준비 전 모바일 목록용: filteredItems 거리순. 초기 빈 플래시 방지. */
+  const sortedFilteredItems = useMemo(() => {
+    const ref = userLocation || mapCenter
+    return filteredItems
+      .map((s) => ({
+        ...s,
+        distanceKm: haversineDistanceKm(ref.lat, ref.lng, s.lat, s.lng),
+      }))
+      .sort((a, b) => a.distanceKm - b.distanceKm)
   }, [filteredItems, userLocation, mapCenter])
+
+  /** 지도 마커용: 데스크탑=filteredItems, 모바일=applied 기준 groupedItemsInScope(1장소 1마커). 선택된 충전소는 범위 밖이어도 포함. */
+  const displayStationsForMap = useMemo(() => {
+    const base = isMobile
+      ? (appliedMapBounds ? groupedItemsInScope : [])
+      : filteredItems
+    if (selectedStation && !base.some((s) => s.id === selectedStation.id)) {
+      return [selectedStation, ...base]
+    }
+    return base
+  }, [isMobile, appliedMapBounds, groupedItemsInScope, filteredItems, selectedStation])
+
+  /** live와 applied가 충분히 다를 때만 "이 지역 충전소 검색하기" 노출 (중심 거리 > 0.15km) */
+  const showSearchAreaButton = useMemo(() => {
+    if (!isMobile || !liveMapBounds || !appliedMapBounds) return false
+    const liveCenter = {
+      lat: (liveMapBounds.southWest.lat + liveMapBounds.northEast.lat) / 2,
+      lng: (liveMapBounds.southWest.lng + liveMapBounds.northEast.lng) / 2,
+    }
+    const appliedCenter = {
+      lat: (appliedMapBounds.southWest.lat + appliedMapBounds.northEast.lat) / 2,
+      lng: (appliedMapBounds.southWest.lng + appliedMapBounds.northEast.lng) / 2,
+    }
+    return haversineDistanceKm(liveCenter.lat, liveCenter.lng, appliedCenter.lat, appliedCenter.lng) > 0.15
+  }, [isMobile, liveMapBounds, appliedMapBounds])
 
   const kpis = useMemo(() => {
     const operators = new Set(filteredItems.map((s) => s.busiNm).filter(Boolean))
@@ -307,7 +504,6 @@ function App() {
 
   const filterOptions = useMemo(() => {
     const busiNms = [...new Set(items.map((s) => s.busiNm).filter(Boolean))].sort()
-    const chgerTys = [...new Set(items.map((s) => String(s.chgerTy)).filter(Boolean))].sort()
     const ctprvnCds = [...new Set(items.map((s) => s.ctprvnCd).filter(Boolean))].sort()
     const sggByCtprvn = {}
     items.forEach((s) => {
@@ -320,10 +516,6 @@ function App() {
     })
     return {
       busiNms: busiNms.map((v) => ({ value: v, label: v })),
-      chgerTys: chgerTys.map((v) => ({
-        value: v,
-        label: items.find((s) => String(s.chgerTy) === v)?.chgerTyLabel ?? v,
-      })),
       ctprvnCds: ctprvnCds.map((v) => ({ value: v, label: v })),
       sggCdsByCtprvn: sggByCtprvn,
     }
@@ -373,12 +565,12 @@ function App() {
         <Box>
           <Typography variant="caption" sx={{ color: colors.gray[700], fontWeight: 600, display: 'block', mb: 0.5 }}>충전기 타입</Typography>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-            {filterOptions.chgerTys.map((opt) => {
-              const v = opt.value ?? opt
-              const selected = filterChgerTy.includes(v)
+            {SPEED_FILTER_OPTIONS.map((opt) => {
+              const v = opt.value
+              const selected = filterSpeed === v
               return (
-                <Chip key={v} label={opt.label ?? v} size="small"
-                  onClick={() => setFilterChgerTy((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]))}
+                <Chip key={v || 'all'} label={opt.label} size="small"
+                  onClick={() => setFilterSpeed(v)}
                   sx={{ fontSize: '0.75rem', height: 24, bgcolor: selected ? colors.blue.primary : 'rgba(255,255,255,0.6)', color: selected ? colors.white : colors.gray[700], border: `1px solid ${selected ? colors.blue.primary : colors.gray[300]}`, '&:hover': { bgcolor: selected ? colors.blue.deep : 'rgba(255,255,255,0.9)', borderColor: selected ? colors.blue.deep : colors.gray[400] } }}
                 />
               )
@@ -482,7 +674,11 @@ function App() {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
               <EvStationIcon sx={{ fontSize: 20, color: colors.blue.primary, flexShrink: 0 }} />
               <Typography variant="h6" sx={{ fontSize: '0.9375rem', fontWeight: 600, color: colors.gray[800], lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {userLocation ? '내 주변 충전소' : '현재 지도 영역'} · {sortedItemsForMobile.length}곳
+                {selectedStation
+                  ? `선택: ${selectedStation.statNm}`
+                  : appliedMapBounds == null
+                    ? '현재 지도 영역 확인 중…'
+                    : `현재 지도 영역 · ${groupedItemsInScope.length}곳`}
               </Typography>
             </Box>
             <IconButton
@@ -491,8 +687,10 @@ function App() {
               size="small"
               sx={{
                 flexShrink: 0,
-                width: 36,
-                height: 36,
+                width: 44,
+                height: 44,
+                minWidth: 44,
+                minHeight: 44,
                 bgcolor: '#fff',
                 color: colors.gray[900],
                 border: `1px solid ${colors.gray[400]}`,
@@ -516,94 +714,18 @@ function App() {
             }}
           >
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-              <Box>
-                <Typography variant="caption" sx={{ color: colors.gray[700], fontWeight: 600, display: 'block', mb: 0.5 }}>충전기 타입</Typography>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                  {filterOptions.chgerTys.map((opt) => {
-                    const v = opt.value ?? opt
-                    const selected = filterChgerTy.includes(v)
-                    return (
-                      <Chip
-                        key={v}
-                        label={opt.label ?? v}
-                        size="small"
-                        onClick={() => setFilterChgerTy((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]))}
-                        sx={{ fontSize: '0.75rem', height: 24, bgcolor: selected ? colors.blue.primary : 'rgba(255,255,255,0.6)', color: selected ? colors.white : colors.gray[700], border: `1px solid ${selected ? colors.blue.primary : colors.gray[300]}`, '&:hover': { bgcolor: selected ? colors.blue.deep : 'rgba(255,255,255,0.9)', borderColor: selected ? colors.blue.deep : colors.gray[400] } }}
-                      />
-                    )
-                  })}
-                </Box>
-              </Box>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-                <Chip label="가까운 순" size="small" sx={{ fontSize: '0.75rem', height: 24, bgcolor: colors.blue.muted, color: colors.blue.deep, border: `1px solid ${colors.blue.primary}` }} />
-                <Button size="small" variant="text" onClick={() => setFilterMoreOpen(true)} sx={{ fontSize: '0.75rem', color: colors.gray[600], minWidth: 0, px: 0.5 }}>
-                  필터 더 보기
-                </Button>
-              </Box>
               <StationListMobile
-                stations={sortedItemsForMobile}
+                key={`scope-${appliedMapBounds ? [appliedMapBounds.southWest.lat, appliedMapBounds.southWest.lng, appliedMapBounds.northEast.lat, appliedMapBounds.northEast.lng].join(',') : 'none'}-${groupedItemsInScope.length}`}
+                stations={groupedItemsInScope}
                 selectedId={selectedStation?.id}
                 onSelect={(s) => setSelectedStation(s)}
+                emptyMessage={appliedMapBounds == null ? '지도 영역을 불러오는 중…' : '현재 지도 영역에 표시할 충전소가 없습니다'}
+                emptySubMessage={appliedMapBounds != null && groupedItemsInScope.length === 0 ? '지도를 이동하거나 필터를 조정해 보세요' : null}
               />
-              <Accordion expanded={statsExpanded} onChange={(_, exp) => setStatsExpanded(exp)} disableGutters sx={{ bgcolor: 'transparent', boxShadow: 'none', '&:before': { display: 'none' } }}>
-                <AccordionSummary expandIcon={<ExpandMore />} sx={{ minHeight: 40, py: 0, '& .MuiAccordionSummary-content': { my: 0.75 } }}>
-                  <Typography variant="subtitle2" sx={{ color: colors.gray[700], fontWeight: 600 }}>통계 보기</Typography>
-                </AccordionSummary>
-                <AccordionDetails sx={{ pt: 0, px: 0 }}>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0.75 }}>
-                    <StatCard label="전체 충전기" value={kpis.totalChargers} />
-                    <StatCard label="운영기관 수" value={kpis.operatorCount} />
-                    <StatCard label="충전소 수" value={kpis.stationCount} />
-                    <StatCard label="충전기 타입" value={kpis.byChgerTy.length} />
-                  </Box>
-                  <Box sx={{ mt: 1.5 }}>
-                    <Typography variant="caption" sx={{ color: colors.gray[700], fontWeight: 600, display: 'block', mb: 0.5 }}>운영기관별 충전기 (Top 10)</Typography>
-                    <Box sx={{ width: '100%', height: 200 }}>
-                      {operatorChartData.length > 0 ? (
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={operatorChartData} layout="vertical" margin={{ top: 4, right: 8, left: 48, bottom: 4 }}>
-                            <CartesianGrid strokeDasharray="2 2" stroke={colors.gray[200]} horizontal={false} />
-                            <XAxis type="number" allowDecimals={false} stroke={colors.gray[400]} tick={{ fontSize: 10 }} />
-                            <YAxis type="category" dataKey="name" width={44} tick={{ fontSize: 10 }} stroke={colors.gray[500]} />
-                            <Tooltip formatter={(v) => [`${v}대`, '']} contentStyle={{ borderRadius: radius.control, border: `1px solid ${colors.gray[200]}`, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }} />
-                            <Bar dataKey="value" name="충전기" radius={[0, 3, 3, 0]}>
-                              {operatorChartData.map((_, i) => (
-                                <Cell key={i} fill={chartBlueScale[i % chartBlueScale.length]} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      ) : (
-                        <Typography variant="caption" sx={{ color: colors.gray[500], py: 2, display: 'block', textAlign: 'center' }}>필터 결과 없음</Typography>
-                      )}
-                    </Box>
-                  </Box>
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="caption" sx={{ color: colors.gray[700], fontWeight: 600, display: 'block', mb: 0.5 }}>충전기 타입 분포</Typography>
-                    <Box sx={{ width: '100%', height: 168 }}>
-                      {kpis.byChgerTy.length > 0 ? (
-                        <ResponsiveContainer width="100%" height="100%">
-                          <PieChart margin={{ top: 4, right: 4, bottom: 28, left: 4 }}>
-                            <Pie data={kpis.byChgerTy} dataKey="count" nameKey="name" cx="50%" cy="42%" innerRadius={32} outerRadius={56} paddingAngle={1}>
-                              {kpis.byChgerTy.map((_, i) => (
-                                <Cell key={i} fill={chartBlueScale[i % chartBlueScale.length]} stroke="rgba(255,255,255,0.6)" strokeWidth={1} />
-                              ))}
-                            </Pie>
-                            <Tooltip formatter={(v) => [`${v}대`, '']} contentStyle={{ borderRadius: radius.control, border: `1px solid ${colors.gray[200]}`, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }} />
-                            <Legend verticalAlign="bottom" layout="horizontal" wrapperStyle={{ fontSize: 10, paddingTop: 4 }} iconSize={8} />
-                          </PieChart>
-                        </ResponsiveContainer>
-                      ) : (
-                        <Typography variant="caption" sx={{ color: colors.gray[500], py: 2, display: 'block', textAlign: 'center' }}>데이터 없음</Typography>
-                      )}
-                    </Box>
-                  </Box>
-                </AccordionDetails>
-              </Accordion>
               <Box sx={{ flexShrink: 0, marginTop: 1, paddingTop: 1.5, borderTop: `1px solid ${colors.gray[200]}`, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
                 <Typography variant="caption" sx={{ color: colors.gray[500], fontSize: '0.75rem', lineHeight: 1.4 }}>생활안전지도 API · 마커 클릭 시 상세</Typography>
                 <Typography variant="caption" sx={{ color: colors.gray[500], fontSize: '0.75rem', lineHeight: 1.4 }}>
-                  표시 {filteredItems.length}건
+                  표시 {appliedMapBounds == null ? '—' : groupedItemsInScope.length}건
                   {totalCount != null && totalCount !== items.length && ` · 전체 약 ${totalCount}건`}
                 </Typography>
                 <Typography component="span" sx={{ color: colors.gray[400], fontSize: '0.7rem', lineHeight: 1.4, marginTop: 0.25 }}>© whereEV2 · Created by James</Typography>
@@ -671,22 +793,25 @@ function App() {
   return (
     <ThemeProvider theme={muiTheme}>
       <CssBaseline />
-      <Box
-        sx={{
-          position: 'fixed',
-          top: 12,
-          left: 12,
-          zIndex: 9999,
-          background: '#111827',
-          color: 'white',
-          padding: '8px 12px',
-          borderRadius: '8px',
-          fontSize: 14,
-          fontWeight: 700,
-        }}
-      >
-        whereEV2 TEST BUILD
-      </Box>
+      {import.meta.env.DEV && (
+        <Box
+          sx={{
+            position: 'fixed',
+            top: 8,
+            left: 8,
+            zIndex: 9999,
+            px: 0.5,
+            py: 0.25,
+            borderRadius: 0.5,
+            bgcolor: 'rgba(17,24,39,0.75)',
+            color: '#fff',
+            fontSize: 10,
+            fontWeight: 600,
+          }}
+        >
+          v2
+        </Box>
+      )}
       <Box
         sx={{
           position: 'relative',
@@ -695,24 +820,53 @@ function App() {
           overflow: 'hidden',
         }}
       >
-        {/* v2 식별: 지도 좌상단 작은 표시 */}
-        <Box
-          sx={{
-            position: 'absolute',
-            top: 10,
-            left: 10,
-            zIndex: 400,
-            px: 0.75,
-            py: 0.25,
-            borderRadius: 1,
-            bgcolor: 'rgba(255,255,255,0.85)',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-          }}
-        >
-          <Typography component="span" sx={{ fontSize: '0.65rem', fontWeight: 600, color: colors.gray[600], letterSpacing: '0.02em' }}>
-            whereEV2
-          </Typography>
-        </Box>
+        {/* 모바일 전용: 상단 충전 타입 빠른 필터 (가볍게) */}
+        {isMobile && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 10,
+              left: 10,
+              right: 52,
+              zIndex: 400,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.5,
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              py: 0.5,
+              px: 0,
+              '&::-webkit-scrollbar': { height: 4 },
+              '&::-webkit-scrollbar-thumb': { borderRadius: 2, bgcolor: colors.gray[300] },
+            }}
+          >
+            {SPEED_FILTER_OPTIONS.map((opt) => {
+              const v = opt.value
+              const selected = filterSpeed === v
+              return (
+                <Chip
+                  key={v || 'all'}
+                  label={opt.label}
+                  size="small"
+                  onClick={() => setFilterSpeed(v)}
+                  sx={{
+                    flexShrink: 0,
+                    fontSize: '0.8125rem',
+                    minHeight: 36,
+                    height: 36,
+                    bgcolor: selected ? colors.blue.primary : '#fff',
+                    color: selected ? colors.white : colors.gray[700],
+                    border: `1px solid ${selected ? colors.blue.primary : colors.gray[300]}`,
+                    '&:hover': {
+                      bgcolor: selected ? colors.blue.deep : colors.gray[50],
+                      borderColor: selected ? colors.blue.deep : colors.gray[400],
+                    },
+                  }}
+                />
+              )
+            })}
+          </Box>
+        )}
         {/* Full-screen map */}
         <Box
           sx={{
@@ -729,8 +883,16 @@ function App() {
             zoomControl={false}
           >
             <MapCenterTracker setMapCenter={setMapCenter} />
+            <MapBoundsTracker setMapBounds={setLiveMapBounds} />
             <MapFocusOnStation selectedStation={selectedStation} />
-            <MapView stations={filteredItems} onDetailClick={(s) => setSelectedStation(s)} />
+            <MapView
+                stations={displayStationsForMap}
+                onDetailClick={(s) => setSelectedStation(s)}
+                selectedId={selectedStation?.id}
+                isMobile={isMobile}
+                defaultMarkerIcon={DEFAULT_MARKER_ICON}
+                selectedMarkerIcon={SELECTED_MARKER_ICON}
+              />
             <ZoomControl position="topright" />
             <LocationControl
               setUserLocation={setUserLocation}
@@ -759,6 +921,7 @@ function App() {
                     weight: 2,
                   }}
                 />
+                <LocationRipple userLocation={userLocation} />
               </>
             )}
           </MapContainer>
@@ -832,37 +995,42 @@ function App() {
           </Box>
         )}
 
+        {/* 모바일 전용: 시트 밖·시트 상단 바로 위 플로팅 액션 (시트와 같은 계층, 시각적으로 붙어 보이게) */}
+        {isMobile && showSearchAreaButton && (
+          <Box
+            sx={{
+              position: 'fixed',
+              left: 12,
+              right: 12,
+              bottom: mobileSheetOpen ? 'calc(60vh + 8px)' : MOBILE_SHEET_HEADER_PX + 8,
+              zIndex: 1001,
+              transition: 'bottom 0.3s ease',
+            }}
+          >
+            <Button
+              variant="contained"
+              fullWidth
+              onClick={() => setAppliedMapBounds(liveMapBoundsRef.current)}
+              sx={{
+                py: 1.1,
+                borderRadius: 1.5,
+                boxShadow: '0 2px 12px rgba(0,0,0,0.12)',
+                bgcolor: colors.blue.primary,
+                fontWeight: 600,
+                fontSize: '0.875rem',
+                textTransform: 'none',
+                '&:hover': { bgcolor: colors.blue.deep, boxShadow: '0 2px 16px rgba(0,0,0,0.15)' },
+              }}
+            >
+              이 지역 충전소 검색하기
+            </Button>
+          </Box>
+        )}
+
         {/* 패널: 모바일 = 바텀시트, 데스크톱 = 좌측 패널 */}
         {panelEl}
 
         <StationDetailModal open={!!selectedStation} station={selectedStation} onClose={() => setSelectedStation(null)} />
-
-        <Modal open={filterMoreOpen} onClose={() => setFilterMoreOpen(false)}>
-          <Box
-            sx={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              width: '90%',
-              maxWidth: 360,
-              maxHeight: '80vh',
-              overflow: 'auto',
-              bgcolor: 'background.paper',
-              borderRadius: 2,
-              boxShadow: 24,
-              p: 2,
-            }}
-          >
-            <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1.5 }}>필터 더 보기</Typography>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-              <FilterModalSelect label="운영기관" value={filterBusiNm} onChange={setFilterBusiNm} options={filterOptions.busiNms} placeholder="전체" searchable />
-              <FilterModalSelect label="시도코드" value={filterCtprvnCd} onChange={setFilterCtprvnCd} options={filterOptions.ctprvnCds} placeholder="미선택" />
-              <FilterModalSelect label="시군구코드" value={filterSggCd} onChange={setFilterSggCd} options={filterOptions.sggCdsByCtprvn[filterCtprvnCd] ?? []} placeholder="미선택" disabled={!filterCtprvnCd} disabledMessage="시도 먼저 선택" />
-            </Box>
-            <Button variant="contained" onClick={() => setFilterMoreOpen(false)} sx={{ mt: 2, width: '100%' }}>적용</Button>
-          </Box>
-        </Modal>
       </Box>
     </ThemeProvider>
   )

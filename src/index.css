@@ -132,20 +132,28 @@ body {
   opacity: 1 !important;
 }
 
-/* EV 대시보드: 지도 팝업 glass 스타일 (정제된 radius) */
+/* EV 대시보드: 지도 팝업 glass 스타일 (밝은 베이스맵에서도 구분되도록 테두리·그림자 유지) */
 .leaflet-popup-content-wrapper {
-  background: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 10px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
 }
 .leaflet-popup-content {
   margin: 8px 12px;
   min-width: 180px;
   font-size: 12px;
   line-height: 1.45;
+}
+@media (max-width: 900px) {
+  .leaflet-popup-content {
+    margin: 6px 10px;
+    min-width: 120px;
+    max-width: 220px;
+    font-size: 11px;
+  }
 }
 
 /* EV 대시보드: 줌/위치 컨트롤 우측 상단, 패널과 간격 */
@@ -166,20 +174,85 @@ body {
   line-height: 1;
 }
 
-/* EV 대시보드: 플랫 블루 원형 마커 */
-.leaflet-div-icon.ev-marker-simple {
+/* EV 지도: 기본/선택 마커 (터치 영역·가시성·선택 강조) */
+.leaflet-div-icon.ev-marker {
   background: transparent !important;
   border: none !important;
 }
-.ev-marker-simple-dot {
-  width: 12px;
-  height: 12px;
-  margin: 2px;
+.ev-marker-default .ev-marker-dot {
+  display: block;
+  width: 20px;
+  height: 20px;
+  margin: 3px;
   border-radius: 50%;
   background: #2563eb;
-  border: 2px solid #fff;
+  border: 3px solid #fff;
   box-sizing: border-box;
-  box-shadow: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+.ev-marker-selected .ev-marker-dot {
+  display: block;
+  width: 28px;
+  height: 28px;
+  margin: 5px;
+  border-radius: 50%;
+  background: #2563eb;
+  border: 3px solid #fff;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35), 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.leaflet-div-icon.ev-marker-selected {
+  z-index: 1000;
+}
+
+/* EV 지도: 현재 위치 ripple (물 파장 느낌, CSS만 사용) */
+.ev-location-ripple-wrapper {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.ev-location-ripple {
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 32px;
+  height: 32px;
+  margin-left: -16px;
+  margin-top: -16px;
+  border-radius: 50%;
+  border: 2px solid #2563eb;
+  opacity: 0.5;
+  animation: ev-location-ripple 2s ease-out infinite;
+  box-sizing: border-box;
+}
+.ev-location-ripple::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 32px;
+  height: 32px;
+  margin-left: -16px;
+  margin-top: -16px;
+  border-radius: 50%;
+  border: 2px solid #2563eb;
+  opacity: 0.4;
+  animation: ev-location-ripple 2s ease-out infinite 0.7s;
+  box-sizing: border-box;
+}
+@keyframes ev-location-ripple {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
 }
 
 h1,

@@ -12,7 +12,7 @@ const SAFEMAP_BASE =
 const SAFEMAP_EV_LIST_PATH = '/openapi2/IF_0042'
 const SAFEMAP_EV_LIST_URL = `${SAFEMAP_BASE}${SAFEMAP_EV_LIST_PATH}`
 
-/** chger_ty 코드 → 한글 라벨 */
+/** chger_ty 코드 → 한글 라벨 (기술 용어) */
 export const CHGER_TY_LABELS = {
   1: 'DC차데모',
   2: 'AC완속',
@@ -26,9 +26,82 @@ export const CHGER_TY_LABELS = {
   10: 'DC콤보+NACS',
 }
 
+/** chger_ty 코드 → 사용자 용어 (급속/완속). AC·완속 계열=완속, DC·NACS 계열=급속. */
+export const CHGER_TY_TO_SPEED = {
+  1: '급속',   // DC차데모
+  2: '완속',   // AC완속
+  3: '급속',   // DC차데모+AC3상
+  4: '급속',   // DC콤보
+  5: '급속',   // DC차데모+DC콤보
+  6: '급속',   // DC차데모+AC3상+DC콤보
+  7: '완속',   // AC3상
+  8: '완속',   // DC콤보(완속)
+  9: '급속',   // NACS
+  10: '급속',  // DC콤보+NACS
+}
+
 export function getChgerTyLabel(code) {
   const c = code != null ? String(code).trim() : ''
   return CHGER_TY_LABELS[c] ?? `타입${c || '?'}`
+}
+
+/** 코드 → 급속/완속. 미매핑은 '급속'으로 처리. */
+export function getSpeedCategory(code) {
+  const c = code != null ? String(code).trim() : ''
+  return CHGER_TY_TO_SPEED[c] ?? '급속'
+}
+
+/** 사용자 표시용: "급속 (DC콤보)" 형태. */
+export function getDisplayChgerLabel(code) {
+  const label = getChgerTyLabel(code)
+  const speed = getSpeedCategory(code)
+  return `${speed} (${label})`
+}
+
+/** 충전기 상태(stat) 코드 → 한글 라벨. 공공 API 공통 코드 기준. */
+export const STAT_LABELS = {
+  1: '통신이상',
+  2: '사용 가능',
+  3: '사용 중',
+  4: '운영중지',
+  5: '점검중',
+  9: '상태미확인',
+}
+
+export function getStatLabel(code) {
+  const c = code != null ? String(code).trim() : ''
+  return STAT_LABELS[c] ?? (c ? `상태${c}` : '—')
+}
+
+/**
+ * stat 코드별 개수 객체에서 요약 문자열 생성.
+ * @param {Record<string, number>} statCounts - { '2': 4, '3': 2, ... }
+ * @param {string[]} order - 표시할 코드 순서(우선 노출할 것 먼저). 기본: 사용 가능(2), 사용 중(3), 점검중(5), 운영중지(4), 통신이상(1), 상태미확인(9)
+ */
+export function formatStatSummary(statCounts, order = ['2', '3', '5', '4', '1', '9']) {
+  if (!statCounts || typeof statCounts !== 'object') return ''
+  const parts = order
+    .filter((code) => statCounts[code] > 0)
+    .map((code) => `${getStatLabel(code)} ${statCounts[code]}`)
+  return parts.join(' · ')
+}
+
+/** row 배열에서 stat 코드별 개수 집계. */
+export function aggregateStatCounts(rows) {
+  const counts = {}
+  for (const r of rows || []) {
+    const s = String(r.stat ?? '').trim()
+    if (s) counts[s] = (counts[s] || 0) + 1
+  }
+  return counts
+}
+
+/** row 배열에서 가장 최근 statUpdDt (문자열 비교). */
+export function getLatestStatUpdDt(rows) {
+  const withDt = (rows || []).filter((r) => r.statUpdDt)
+  if (!withDt.length) return ''
+  withDt.sort((a, b) => String(b.statUpdDt || '').localeCompare(String(a.statUpdDt || '')))
+  return withDt[0].statUpdDt
 }
 
 /**
@@ -56,13 +129,18 @@ export function normalizeCharger(item, index) {
     return null
   }
   const chgerTyCode = get(item, 'chger_ty', 'chgerTy') || ''
+  const chgerTyLabel = getChgerTyLabel(chgerTyCode)
   return {
     id: get(item, 'chger_id', 'chgerId', 'objt_id', 'objtId') || `ev-${index}`,
     statId: get(item, 'stat_id', 'statId'),
     statNm: get(item, 'stat_nm', 'statNm') || '이름 없음',
     chgerId: get(item, 'chger_id', 'chgerId'),
+    stat: get(item, 'stat'), // 충전기 상태 코드 (1~5, 9 등)
+    statUpdDt: get(item, 'stat_upd_dt', 'statUpdDt'),
     chgerTy: chgerTyCode,
-    chgerTyLabel: getChgerTyLabel(chgerTyCode),
+    chgerTyLabel,
+    speedCategory: getSpeedCategory(chgerTyCode),
+    displayChgerLabel: getDisplayChgerLabel(chgerTyCode),
     useTm: get(item, 'use_tm', 'useTm'),
     busiId: get(item, 'busi_id', 'busiId'),
     busiNm: get(item, 'busi_nm', 'busiNm') || '-',

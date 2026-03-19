@@ -21,3 +21,18 @@ export function formatDistanceKm(km) {
   if (km < 1) return `약 ${(km * 1000).toFixed(0)}m`
   return `약 ${km.toFixed(1)}km`
 }
+
+/** 같은 장소 그룹 키: statNm + 좌표(소수 5자리). */
+export function placeKey(row) {
+  const lat = Number(row.lat).toFixed(5)
+  const lng = Number(row.lng).toFixed(5)
+  return `${(row.statNm || '').trim()}|${lat}|${lng}`
+}
+
+/** 여러 값 요약 표시 (최대 2개 + 나머지 N). */
+export function formatListSummary(arr, maxShow = 2) {
+  if (!arr || arr.length === 0) return '-'
+  const uniq = [...new Set(arr)].filter(Boolean)
+  if (uniq.length <= maxShow) return uniq.join(' · ')
+  return uniq.slice(0, maxShow).join(' · ') + ` +${uniq.length - maxShow}`
+}
